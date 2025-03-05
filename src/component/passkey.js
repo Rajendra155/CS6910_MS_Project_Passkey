@@ -51,6 +51,7 @@ function Passkey() {
         },
         pubKeyCredParams: publicKeyCredentialCreationOptions.pubKeyCredParams,
         authenticatorSelection: publicKeyCredentialCreationOptions.authenticatorSelection,
+        attestation: publicKeyCredentialCreationOptions.attestation,
       };
 
       const credential = await navigator.credentials.create({

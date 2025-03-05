@@ -69,7 +69,7 @@ app.post('/webauthn/register', (req, res) => {
             const publicKeyCredentialCreationOptions = {
                 challenge: challenge,
                 rp: {
-                    name: 'WebAuthn Demo',
+                    name: 'Passwordless login',
                     id: 'localhost'
                 },
                 user: {
@@ -77,13 +77,15 @@ app.post('/webauthn/register', (req, res) => {
                     name: email,
                     displayName: email,
                 },
-                pubKeyCredParams: [{ type: 'public-key', alg: -7 }], // ES256
+                pubKeyCredParams: [{ type: 'public-key', alg: -7 },
+                    { type: 'public-key', alg: -257 }
+                ], // ES256 RS256
                 authenticatorSelection: {
                     authenticatorAttachment: 'platform',
                     residentKey: 'required',
                     userVerification: 'required',
                 },
-                attestation: 'none',
+                attestation: 'direct',
             };
 
             // Respond with WebAuthn options

@@ -2,21 +2,27 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const crypto = require('crypto');
-const mysql = require('mysql');
+const mysql = require('mysql2');
+require('dotenv').config();  // Load environment variables from Render
 
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: 'https://passkeyauthentication.netlify.app/', // Allow requests only from your Netlify frontend
+    methods: ['GET', 'POST'], // Allow the necessary HTTP methods
+    allowedHeaders: ['Content-Type'], // Adjust based on the headers you're using
+}));
 app.use(bodyParser.json());
 
 const users = {}; // Store users by email
 
 
-var con =mysql.createConnection({
-    host:'localhost',
-    user:"root",
-    password:"Hashtag@123",
-    database:'webauthn_passkey'
+var con = mysql.createConnection({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_DATABASE,
+    port: process.env.DB_PORT || '3306'
 })
 
 con.connect(function(err,result){
@@ -219,6 +225,8 @@ app.post('/webauthn/authenticate/complete', (req, res) => {
     })
 });
 
-app.listen(5200, () => {
-    console.log('Server running on port 5200...');
+const PORT = process.env.PORT || 5200;
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}...`);
 });

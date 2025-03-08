@@ -37,7 +37,7 @@ function Passkey() {
 
     setError('');
     try {
-      const { data: publicKeyCredentialCreationOptions } = await axios.post('http://localhost:5200/webauthn/register', { email });
+      const { data: publicKeyCredentialCreationOptions } = await axios.post('https://cs6910-ms-project-passkey-2.onrender.com/webauthn/register', { email });
 
       const publicKeyCredentialCreationOptionsParsed = {
         // Convert base64url challenge to Uint8Array
@@ -58,7 +58,7 @@ function Passkey() {
         publicKey: publicKeyCredentialCreationOptionsParsed,
       });
 
-      await axios.post('http://localhost:5200/webauthn/register/complete', {
+      await axios.post('https://cs6910-ms-project-passkey-2.onrender.com/webauthn/register/complete', {
         email,
         credential,
       });
@@ -80,7 +80,7 @@ function Passkey() {
 
     try {
       const { data: publicKeyCredentialRequestOptions } = await axios.post(
-        'http://localhost:5200/webauthn/authenticate',
+        'https://cs6910-ms-project-passkey-2.onrender.com/webauthn/authenticate',
         { email }
       );
 
@@ -114,7 +114,7 @@ function Passkey() {
         }
       };
 
-      await axios.post('http://localhost:5200/webauthn/authenticate/complete', {
+      await axios.post('https://cs6910-ms-project-passkey-2.onrender.com/webauthn/authenticate/complete', {
         email,
         assertion: assertionResponse
       });

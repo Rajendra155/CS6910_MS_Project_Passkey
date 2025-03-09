@@ -16,6 +16,7 @@ function Passkey() {
       .replace(/_/g, '/')
       + padding;
   };
+  // Comments
 
 
   // Helper function to convert base64url to binary array

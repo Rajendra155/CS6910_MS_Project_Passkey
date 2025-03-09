@@ -8,7 +8,6 @@ require('dotenv').config();  // Load environment variables from Render
 
 const app = express();
 app.use(cors({
-    origin: 'https://passkeyauthentication.netlify.app/', // Allow requests only from your Netlify frontend
     methods: ['GET', 'POST'], // Allow the necessary HTTP methods
     allowedHeaders: ['Content-Type'], // Adjust based on the headers you're using
 }));

@@ -141,7 +141,7 @@ app.post('/webauthn/authenticate', async (req, res) => {
             return res.status(400).json({ error: 'User not registered' });
         }
 
-        const credential = JSON.parse(results[0].credential);
+        const credential = results[0].credential;
         const challenge = crypto.randomBytes(32).toString('base64');
 
         // Store challenge in database

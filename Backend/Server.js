@@ -20,7 +20,7 @@ const pool = mysql.createPool({ // Create the connection pool
     database: process.env.DB_DATABASE,
     port: process.env.DB_PORT || '3306',
     ssl: {
-        ca: fs.readFileSync('C:\\Users\\chitt\\OneDrive\\Desktop\\REACT\\passkey\\Backend\\isrgrootx1.pem'), // Correct path to your CA certificate
+        ca: fs.readFileSync('./isrgrootx1.pem'), // Correct path to your CA certificate
     },
     waitForConnections: true,
     connectionLimit: 10,

@@ -2,7 +2,8 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const crypto = require('crypto');
-const mysql = require('mysql2/promise'); // Use promise-based mysql2
+const mysql = require('mysql2/promise'); 
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +19,9 @@ const pool = mysql.createPool({ // Create the connection pool
     password: process.env.DB_PASSWORD,
     database: process.env.DB_DATABASE,
     port: process.env.DB_PORT || '3306',
+    ssl: {
+        ca: fs.readFileSync('C:\\Users\\chitt\\OneDrive\\Desktop\\REACT\\passkey\\Backend\\isrgrootx1.pem'), // Correct path to your CA certificate
+    },
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0

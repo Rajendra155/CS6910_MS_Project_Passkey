@@ -68,7 +68,7 @@ app.post('/webauthn/register', async (req, res) => {
             challenge: challenge,
             rp: {
                 name: 'Passwordless login',
-                id: 'localhost' // Replace with your actual domain
+                id: 'passkeyauthentication.netlify.app' 
             },
             user: {
                 id: userId,
@@ -201,4 +201,9 @@ app.post('/webauthn/authenticate/complete', async (req, res) => {
     }
 });
 
-// ... (rest of your code) ...
+const PORT = process.env.PORT || 5200;
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}...`);
+});
+

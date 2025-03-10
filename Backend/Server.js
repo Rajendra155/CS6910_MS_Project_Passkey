@@ -2,56 +2,55 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const crypto = require('crypto');
-const mysql = require('mysql2');
-require('dotenv').config();  // Load environment variables from Render
-
+const mysql = require('mysql2/promise'); // Use promise-based mysql2
+require('dotenv').config();
 
 const app = express();
 app.use(cors({
-    methods: ['GET', 'POST'], // Allow the necessary HTTP methods
-    allowedHeaders: ['Content-Type'], // Adjust based on the headers you're using
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type'],
 }));
 app.use(bodyParser.json());
 
-const users = {}; // Store users by email
-
-
-var con = mysql.createConnection({
+const pool = mysql.createPool({ // Create the connection pool
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_DATABASE,
-    port: process.env.DB_PORT || '3306'
-})
+    port: process.env.DB_PORT || '3306',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
 
-con.connect(function(err,result){
-    if(err)
-    {
-        console.log('Error connectiong to database');
-        return;
+// Test the database connection (optional)
+async function testConnection() {
+    try {
+        const connection = await pool.getConnection();
+        console.log('Connected to Database');
+        connection.release();
+    } catch (err) {
+        console.error('Error connecting to database:', err);
     }
-    console.log('Connected to Database');
+}
+testConnection();
 
-})
-
-app.post('/webauthn/register', (req, res) => {
+// --- /webauthn/register ---
+app.post('/webauthn/register', async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
         return res.status(400).json({ error: 'Email is required' });
     }
 
-    // Check if the user already exists
-    const checkUserQuery = `SELECT * FROM users WHERE email = ?`;
-    con.query(checkUserQuery, [email], (err, results) => {
-        if (err) {
-            console.error('Error checking user:', err);
-            return res.status(500).json({ error: 'Database error' });
-        }
+    try {
+        const connection = await pool.getConnection();
+
+        // Check if the user already exists
+        const [results] = await connection.query('SELECT * FROM users WHERE email = ?', [email]);
 
         if (results.length > 0) {
-            // If user already exists, return a message
-            console.error('Email already exists',err);
+            connection.release();
             return res.status(400).json({ error: 'User already exists' });
         }
 
@@ -60,172 +59,146 @@ app.post('/webauthn/register', (req, res) => {
         const challenge = crypto.randomBytes(32).toString('base64');
 
         // Store the new user and challenge in the database
-        const insertUserQuery = `
-            INSERT INTO users (email, user_id, challenge) 
-            VALUES (?, ?, ?)
-        `;
-        con.query(insertUserQuery, [email, userId, challenge], (err) => {
-            if (err) {
-                console.error('Error storing challenge:', err);
-                return res.status(500).json({ error: 'Database error' });
-            }
+        await connection.query('INSERT INTO users (email, user_id, challenge) VALUES (?, ?, ?)', [email, userId, challenge]);
 
-            // Define WebAuthn options for registration
-            const publicKeyCredentialCreationOptions = {
-                challenge: challenge,
-                rp: {
-                    name: 'Passwordless login',
-                    id: 'localhost'
-                },
-                user: {
-                    id: userId,
-                    name: email,
-                    displayName: email,
-                },
-                pubKeyCredParams: [{ type: 'public-key', alg: -7 },
-                    { type: 'public-key', alg: -257 }
-                ], // ES256 RS256
-                authenticatorSelection: {
-                    authenticatorAttachment: 'platform',
-                    residentKey: 'required',
-                    userVerification: 'required',
-                },
-                attestation: 'direct',
-            };
+        connection.release();
 
-            // Respond with WebAuthn options
-            res.json(publicKeyCredentialCreationOptions);
-        });
-    });
+        // Define WebAuthn options for registration
+        const publicKeyCredentialCreationOptions = {
+            challenge: challenge,
+            rp: {
+                name: 'Passwordless login',
+                id: 'localhost' // Replace with your actual domain
+            },
+            user: {
+                id: userId,
+                name: email,
+                displayName: email,
+            },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+            authenticatorSelection: {
+                authenticatorAttachment: 'platform',
+                residentKey: 'required',
+                userVerification: 'required',
+            },
+            attestation: 'direct',
+        };
+
+        res.json(publicKeyCredentialCreationOptions);
+    } catch (err) {
+        console.error('Error in /webauthn/register:', err);
+        return res.status(500).json({ error: 'Database error' });
+    }
 });
 
-
-// Endpoint to complete registration
-app.post('/webauthn/register/complete', (req, res) => {
+// --- /webauthn/register/complete ---
+app.post('/webauthn/register/complete', async (req, res) => {
     const { email, credential } = req.body;
     if (!email || !credential) {
         return res.status(400).json({ error: 'Invalid request' });
     }
 
-    const updateCredentialQuery = `
-    UPDATE users 
-    SET credential = ? 
-    WHERE email = ?
-`;
+    try {
+        const connection = await pool.getConnection();
 
-// Credential was stored in JSON format
-con.query(updateCredentialQuery, [JSON.stringify(credential), email], (err) => {
-    if (err) {
+        const updateCredentialQuery = `
+            UPDATE users
+            SET credential = ?
+            WHERE email = ?
+        `;
+
+        await connection.query(updateCredentialQuery, [JSON.stringify(credential), email]);
+
+        connection.release();
+
+        res.json({ success: true });
+        console.log(`Credential saved for ${email}`);
+    } catch (err) {
         console.error('Error storing credential:', err);
         return res.status(500).json({ error: 'Database error' });
     }
-
-    res.json({ success: true });
-    console.log(`Credential saved for ${email}`);
-});
 });
 
-// Begin authentication
-app.post('/webauthn/authenticate', (req, res) => {
+// --- /webauthn/authenticate ---
+app.post('/webauthn/authenticate', async (req, res) => {
     const { email } = req.body;
 
     if (!email) {
         return res.status(400).json({ error: 'Email is required' });
     }
 
- 
-// It will retrieve the credential from users table based on given email
-    const getUserQuery = `SELECT credential FROM users WHERE email = ?`;
+    try {
+        const connection = await pool.getConnection();
 
-   
-    con.query(getUserQuery, [email], (err, results) => {
-        if (err) {
-            console.error('Error fetching user:', err);
-            //If user is not found returns a 400 error
-            return res.status(500).json({ error: 'Database error' });
-        }
+        const [results] = await connection.query('SELECT credential FROM users WHERE email = ?', [email]);
 
         if (results.length === 0 || !results[0].credential) {
+            connection.release();
             return res.status(400).json({ error: 'User not registered' });
         }
 
-        //Converts the stored credential (which is saved as a JSON string) back into an object.
         const credential = JSON.parse(results[0].credential);
-
-        //generates a new challenge
         const challenge = crypto.randomBytes(32).toString('base64');
 
         // Store challenge in database
-        const updateChallengeQuery = `UPDATE users SET challenge = ? WHERE email = ?`;
-        con.query(updateChallengeQuery, [challenge, email], (err) => {
-            if (err) {
-                console.error('Error updating challenge:', err);
-                return res.status(500).json({ error: 'Database error' });
-            }
+        await connection.query('UPDATE users SET challenge = ? WHERE email = ?', [challenge, email]);
 
-            // Send authentication request to frontend
-            const publicKeyCredentialRequestOptions = {
-                challenge: challenge,
-                allowCredentials: [
-                    {
-                        type: 'public-key',
-                        id: credential.rawId, // Registered credential ID
-                        transports: ['internal'],
-                    }
-                ],
-                userVerification: 'required',
-            };
-            res.json(publicKeyCredentialRequestOptions);
-        });
-    });
-    
-    
+        connection.release();
+
+        // Send authentication request to frontend
+        const publicKeyCredentialRequestOptions = {
+            challenge: challenge,
+            allowCredentials: [
+                {
+                    type: 'public-key',
+                    id: credential.rawId,
+                    transports: ['internal'],
+                }
+            ],
+            userVerification: 'required',
+        };
+
+        res.json(publicKeyCredentialRequestOptions);
+    } catch (err) {
+        console.error('Error in /webauthn/authenticate:', err);
+        return res.status(500).json({ error: 'Database error' });
+    }
 });
 
-// Verify authentication response
-app.post('/webauthn/authenticate/complete', (req, res) => {
+// --- /webauthn/authenticate/complete ---
+app.post('/webauthn/authenticate/complete', async (req, res) => {
     const { email, assertion } = req.body;
 
     if (!email || !assertion) {
         return res.status(400).json({ error: 'Invalid request' });
     }
 
-    //Retrieve stored challenge from database 
-    const getChallengeQuery =`select challenge from users where email = ?`;
+    try {
+        const connection = await pool.getConnection();
 
+        const [results] = await connection.query('SELECT challenge FROM users WHERE email = ?', [email]);
 
-    con.query(getChallengeQuery,[email],(err,results) => {
-    if(err)
-    {
-        console.log('Error fecthing challenge');
-        return res.status(500).json({ error: 'Database error' });
-    }
+        if (results.length === 0 || !results[0].challenge) {
+            connection.release();
+            return res.status(400).json({ error: 'Invalid authentication request' });
+        }
 
-    if (results.length === 0 || !results[0].challenge) {
-        return res.status(400).json({ error: 'Invalid authentication request' });
-    }
-   
-    const storedChallenge = results[0].challenge;
+        const storedChallenge = results[0].challenge;
+
+        // Perform assertion verification here (using storedChallenge and assertion)
+        // ...
+
+        // Clear challenge after successful authentication
+        await connection.query('UPDATE users SET challenge = NULL WHERE email = ?', [email]);
+
+        connection.release();
 
         console.log('User authenticated:', email);
-
-    // Clear challenge after successful authentication
-    const clearChallengeQuery = `UPDATE users SET challenge = NULL WHERE email = ?`;
-    con.query(clearChallengeQuery, [email], (err) => {
-        if (err) {
-            console.error('Error clearing challenge:', err);
-        }
-    });
-
-    res.json({ success: true });
-
-
-
-    })
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error in /webauthn/authenticate/complete:', err);
+        return res.status(500).json({ error: 'Database error' });
+    }
 });
 
-const PORT = process.env.PORT || 5200;
-
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}...`);
-});
+// ... (rest of your code) ...

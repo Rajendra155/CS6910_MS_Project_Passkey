@@ -6,6 +6,8 @@ const mysql = require('mysql2/promise');
 const fs = require('fs');
 require('dotenv').config();
 
+const { verifyRegistrationResponse, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+
 const app = express();
 app.use(cors({
     methods: ['GET', 'POST'],
@@ -26,18 +28,6 @@ const pool = mysql.createPool({ // Create the connection pool
     connectionLimit: 10,
     queueLimit: 0
 });
-
-// Test the database connection (optional)
-async function testConnection() {
-    try {
-        const connection = await pool.getConnection();
-        console.log('Connected to Database');
-        connection.release();
-    } catch (err) {
-        console.error('Error connecting to database:', err);
-    }
-}
-testConnection();
 
 // --- /webauthn/register ---
 app.post('/webauthn/register', async (req, res) => {
@@ -60,7 +50,8 @@ app.post('/webauthn/register', async (req, res) => {
 
         // Proceed with registration if the user doesn't exist
         const userId = crypto.randomBytes(32).toString('base64');
-        const challenge = crypto.randomBytes(32).toString('base64');
+        const challengeBuffer = crypto.randomBytes(32);
+        const challenge = base64url.encode(challengeBuffer);
 
         // Store the new user and challenge in the database
         await connection.query('INSERT INTO users (email, user_id, challenge) VALUES (?, ?, ?)', [email, userId, challenge]);
@@ -72,7 +63,7 @@ app.post('/webauthn/register', async (req, res) => {
             challenge: challenge,
             rp: {
                 name: 'Passwordless login',
-                id: 'passkeyauthentication.netlify.app' 
+                id: 'passkeyauthentication.netlify.app'
             },
             user: {
                 id: userId,
@@ -104,26 +95,57 @@ app.post('/webauthn/register/complete', async (req, res) => {
 
     try {
         const connection = await pool.getConnection();
+        const [challengeResults] = await connection.query('SELECT challenge, user_id FROM users WHERE email = ?', [email]);
 
-        const updateCredentialQuery = `
-            UPDATE users
-            SET credential = ?
-            WHERE email = ?
-        `;
+        if (challengeResults.length === 0 || !challengeResults[0].challenge) {
+            connection.release();
+            return res.status(400).json({ error: 'Invalid authentication request' });
+        }
 
-        await connection.query(updateCredentialQuery, [JSON.stringify(credential), email]);
+        const storedChallenge = challengeResults[0].challenge;
+        const userId = challengeResults[0].user_id;
 
-        connection.release();
+        const verification = await verifyRegistrationResponse({
+            response: credential,
+            expectedChallenge: storedChallenge,
+            expectedOrigin: 'https://passkeyauthentication.netlify.app',
+            expectedRPID: 'passkeyauthentication.netlify.app',
+        });
 
-        res.json({ success: true });
-        console.log(`Credential saved for ${email}`);
+        const { verified, registrationInfo } = verification;
+
+        if (verified && registrationInfo) {
+            let credentialPublicKeyBase64 = null;
+            let credentialIDBase64url = null;
+            const initialCounter = 0;
+
+            if (registrationInfo.credential && registrationInfo.credential.id) {
+                credentialIDBase64url = registrationInfo.credential.id;
+            }
+
+            if (registrationInfo.credential && registrationInfo.credential.publicKey) {
+                credentialPublicKeyBase64 = Buffer.from(registrationInfo.credential.publicKey).toString('base64');
+            }
+
+            const insertCredentialQuery = `UPDATE users SET credential = ?, public_key = ?, credential_id = ?, counter = ? WHERE email = ?`;
+            await connection.query(insertCredentialQuery, [JSON.stringify(registrationInfo), credentialPublicKeyBase64, credentialIDBase64url, initialCounter, email]);
+
+            connection.release();
+            res.json({ success: true });
+            console.log(`Credential and public key saved for ${email}`);
+            if (credentialPublicKeyBase64) console.log('Public Key (Base64):', credentialPublicKeyBase64);
+            if (credentialIDBase64url) console.log('Credential ID (Base64URL):', credentialIDBase64url);
+        } else {
+            connection.release();
+            return res.status(400).json({ error: 'Registration verification failed' });
+        }
     } catch (err) {
         console.error('Error storing credential:', err);
         return res.status(500).json({ error: 'Database error' });
     }
 });
 
-// --- /webauthn/authenticate ---
+// --- /webauthn/authenticate -----
 app.post('/webauthn/authenticate', async (req, res) => {
     const { email } = req.body;
 
@@ -134,20 +156,24 @@ app.post('/webauthn/authenticate', async (req, res) => {
     try {
         const connection = await pool.getConnection();
 
-        const [results] = await connection.query('SELECT credential FROM users WHERE email = ?', [email]);
+        // Generate a new challenge (using base64url encoding)
+        const challengeBuffer = crypto.randomBytes(32);
+        const challenge = base64url.encode(challengeBuffer);
 
-        if (results.length === 0 || !results[0].credential) {
-            connection.release();
-            return res.status(400).json({ error: 'User not registered' });
-        }
-
-        const credential = results[0].credential;
-        const challenge = crypto.randomBytes(32).toString('base64');
+        console.log("Generated challenge for authentication:", challenge);
 
         // Store challenge in database
         await connection.query('UPDATE users SET challenge = ? WHERE email = ?', [challenge, email]);
 
-        connection.release();
+        // Retrieve the credential ID for this user
+        const [results] = await connection.query('SELECT credential_id FROM users WHERE email = ?', [email]);
+
+        if (results.length === 0 || !results[0].credential_id) {
+            connection.release();
+            return res.status(400).json({ error: 'User not found or not registered' });
+        }
+
+        const credentialId = results[0].credential_id;
 
         // Send authentication request to frontend
         const publicKeyCredentialRequestOptions = {
@@ -155,13 +181,15 @@ app.post('/webauthn/authenticate', async (req, res) => {
             allowCredentials: [
                 {
                     type: 'public-key',
-                    id: credential.rawId,
+                    id: credentialId,
                     transports: ['internal'],
                 }
             ],
             userVerification: 'required',
+            timeout: 60000,
         };
 
+        connection.release();
         res.json(publicKeyCredentialRequestOptions);
     } catch (err) {
         console.error('Error in /webauthn/authenticate:', err);
@@ -169,7 +197,6 @@ app.post('/webauthn/authenticate', async (req, res) => {
     }
 });
 
-// --- /webauthn/authenticate/complete ---
 app.post('/webauthn/authenticate/complete', async (req, res) => {
     const { email, assertion } = req.body;
 
@@ -180,28 +207,92 @@ app.post('/webauthn/authenticate/complete', async (req, res) => {
     try {
         const connection = await pool.getConnection();
 
-        const [results] = await connection.query('SELECT challenge FROM users WHERE email = ?', [email]);
+        const [results] = await connection.query('SELECT challenge, public_key, credential_id, counter FROM users WHERE email = ?', [email]);
 
-        if (results.length === 0 || !results[0].challenge) {
+        if (results.length === 0) {
             connection.release();
-            return res.status(400).json({ error: 'Invalid authentication request' });
+            return res.status(400).json({ error: 'User not found' });
         }
 
-        const storedChallenge = results[0].challenge;
+        const userData = results[0];
 
-        // Perform assertion verification here (using storedChallenge and assertion)
-        // ...
+        if (!userData.challenge) {
+            connection.release();
+            return res.status(400).json({ error: 'No active authentication request' });
+        }
 
-        // Clear challenge after successful authentication
-        await connection.query('UPDATE users SET challenge = NULL WHERE email = ?', [email]);
+        if (!userData.public_key || !userData.credential_id) {
+            connection.release();
+            return res.status(400).json({ error: 'User not properly registered' });
+        }
+
+        const storedChallenge = userData.challenge;
+        const publicKeyBase64 = userData.public_key;
+        const credentialId = userData.credential_id;
+        const storedCounter = typeof userData.counter === 'number' ? userData.counter : 0;
+
+        // Helper function to ensure base64url format
+        const toBase64Url = (str) => {
+            if (!/[+/=]/.test(str)) {
+                return str;
+            }
+            return str.replace(/\+/g, '-')
+                .replace(/\//g, '_')
+                .replace(/=+$/, '');
+        };
+
+        // Properly format all parts of the assertion for WebAuthn verification
+        const formattedAssertion = {
+            id: toBase64Url(assertion.id || assertion.rawId),
+            rawId: toBase64Url(assertion.rawId || assertion.id),
+            type: assertion.type,
+            response: {
+                clientDataJSON: toBase64Url(assertion.response.clientDataJSON),
+                authenticatorData: toBase64Url(assertion.response.authenticatorData),
+                signature: toBase64Url(assertion.response.signature)
+            }
+        };
+
+        // Add userHandle if it exists
+        if (assertion.response.userHandle) {
+            formattedAssertion.response.userHandle = toBase64Url(assertion.response.userHandle);
+        }
+
+        const verification = await verifyAuthenticationResponse({
+            response: formattedAssertion,
+            expectedChallenge: storedChallenge,
+            expectedOrigin: 'https://passkeyauthentication.netlify.app', // Update with your origin
+            expectedRPID: 'passkeyauthentication.netlify.app', // Update with your RPID
+            credential: {
+                id: credentialId,
+                publicKey: Buffer.from(publicKeyBase64, 'base64'),
+                credentialPublicKey: Buffer.from(publicKeyBase64, 'base64'),
+                counter: storedCounter
+            },
+            requireUserVerification: true,
+        });
+
+        console.log('Library verification successful:', JSON.stringify(verification, null, 2));
+
+        // Extract the new counter value from verification result
+        const newCounter = verification.authenticationInfo.newCounter;
+        console.log('Authentication successful for user:', email);
+
+        // Update the counter and clear the challenge
+        await connection.query('UPDATE users SET challenge = NULL, counter = ? WHERE email = ?', [newCounter, email]);
 
         connection.release();
 
-        console.log('User authenticated:', email);
-        res.json({ success: true });
-    } catch (err) {
-        console.error('Error in /webauthn/authenticate/complete:', err);
-        return res.status(500).json({ error: 'Database error' });
+        res.json({
+            success: true,
+            message: 'Authentication successful'
+        });
+    } catch (error) {
+        console.error('Authentication verification error:', error);
+        return res.status(400).json({
+            error: 'Authentication failed',
+            details: error.message
+        });
     }
 });
 

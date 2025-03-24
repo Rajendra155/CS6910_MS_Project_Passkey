@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const mysql = require('mysql2/promise'); 
 const fs = require('fs');
 require('dotenv').config();
+const base64url = require('base64url');
 
 const { verifyRegistrationResponse, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 

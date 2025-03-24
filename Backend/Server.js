@@ -63,7 +63,7 @@ app.post('/webauthn/register', async (req, res) => {
             challenge: challenge,
             rp: {
                 name: 'Passwordless login',
-                id: 'passkeyauthentication.netlify.app'
+                id: 'passkey-frontend.onrender.com'
             },
             user: {
                 id: userId,
@@ -108,8 +108,8 @@ app.post('/webauthn/register/complete', async (req, res) => {
         const verification = await verifyRegistrationResponse({
             response: credential,
             expectedChallenge: storedChallenge,
-            expectedOrigin: 'https://passkeyauthentication.netlify.app',
-            expectedRPID: 'passkeyauthentication.netlify.app',
+            expectedOrigin: 'https://passkey-frontend.onrender.com',
+            expectedRPID: 'passkey-frontend.onrender.com',
         });
 
         const { verified, registrationInfo } = verification;
@@ -261,8 +261,8 @@ app.post('/webauthn/authenticate/complete', async (req, res) => {
         const verification = await verifyAuthenticationResponse({
             response: formattedAssertion,
             expectedChallenge: storedChallenge,
-            expectedOrigin: 'https://passkeyauthentication.netlify.app', // Update with your origin
-            expectedRPID: 'passkeyauthentication.netlify.app', // Update with your RPID
+            expectedOrigin: 'https://passkey-frontend.onrender.com', // Update with your origin
+            expectedRPID: 'passkey-frontend.onrender.com', // Update with your RPID
             credential: {
                 id: credentialId,
                 publicKey: Buffer.from(publicKeyBase64, 'base64'),

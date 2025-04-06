@@ -63,7 +63,7 @@ app.post('/webauthn/register', async (req, res) => {
         const publicKeyCredentialCreationOptions = {
             challenge: challenge,
             rp: {
-                name: 'Passwordless login',
+                name: 'Tic-Tac-Toe',
                 id: 'passkey-frontend.onrender.com'
             },
             user: {

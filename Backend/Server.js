@@ -2,228 +2,293 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const crypto = require('crypto');
-const mysql = require('mysql2/promise'); 
-const fs = require('fs');
-require('dotenv').config();
+const mysql = require('mysql');
 const base64url = require('base64url');
-
 const { verifyRegistrationResponse, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
+
+
 const app = express();
-app.use(cors({
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type'],
-}));
+app.use(cors());
 app.use(bodyParser.json());
 
-const pool = mysql.createPool({ // Create the connection pool
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_DATABASE,
-    port: process.env.DB_PORT || '3306',
-    ssl: {
-        ca: fs.readFileSync('./isrgrootx1.pem'), // Correct path to your CA certificate
-    },
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+const users = {}; // Store users by email
+
+var con = mysql.createConnection({
+    host: 'localhost',
+    user: "root",
+    password: "Hashtag@123",
+    database: 'webauthn_passkey'
 });
 
-// --- /webauthn/register ---
-app.post('/webauthn/register', async (req, res) => {
+con.connect(function(err, result) {
+    if (err) {
+        console.log('Error connecting to database');
+        return;
+    }
+    console.log('Connected to Database');
+});
+
+app.post('/webauthn/register', (req, res) => {
     const { email } = req.body;
 
     if (!email) {
         return res.status(400).json({ error: 'Email is required' });
     }
 
-    try {
-        const connection = await pool.getConnection();
-
-        // Check if the user already exists
-        const [results] = await connection.query('SELECT * FROM users WHERE email = ?', [email]);
+    // Check if the user already exists
+    const checkUserQuery = `SELECT * FROM users WHERE email = ?`;
+    con.query(checkUserQuery, [email], (err, results) => {
+        if (err) {
+            console.error('Error checking user:', err);
+            return res.status(500).json({ error: 'Database error' });
+        }
 
         if (results.length > 0) {
-            connection.release();
+            // If user already exists, return a message
+            console.error('Email already exists');
             return res.status(400).json({ error: 'User already exists' });
         }
 
         // Proceed with registration if the user doesn't exist
         const userId = crypto.randomBytes(32).toString('base64');
+       
+        // Generate the challenge as a Buffer first
         const challengeBuffer = crypto.randomBytes(32);
+
+        // Encode the challenge using base64url
         const challenge = base64url.encode(challengeBuffer);
 
         // Store the new user and challenge in the database
-        await connection.query('INSERT INTO users (email, user_id, challenge) VALUES (?, ?, ?)', [email, userId, challenge]);
+        const insertUserQuery = `
+            INSERT INTO users (email, user_id, challenge) 
+            VALUES (?, ?, ?)
+        `;
+        con.query(insertUserQuery, [email, userId, challenge], (err) => {
+            if (err) {
+                console.error('Error storing challenge:', err);
+                return res.status(500).json({ error: 'Database error' });
+            }
 
-        connection.release();
+            // Define WebAuthn options for registration
+            const publicKeyCredentialCreationOptions = {
+                challenge: challenge,
+                rp: {
+                    name: 'Passwordless login',
+                    id: 'localhost'
+                },
+                user: {
+                    id: userId,
+                    name: email,
+                    displayName: email,
+                },
+                pubKeyCredParams: [
+                    { type: 'public-key', alg: -7 },
+                    { type: 'public-key', alg: -257 }
+                ], // ES256 RS256
+                authenticatorSelection: {
+                    authenticatorAttachment: 'platform',
+                    residentKey: 'required',
+                    userVerification: 'required',
+                },
+                attestation: 'direct',
+            };
 
-        // Define WebAuthn options for registration
-        const publicKeyCredentialCreationOptions = {
-            challenge: challenge,
-            rp: {
-                name: 'Tic-Tac-Toe',
-                id: 'passkey-frontend.onrender.com'
-            },
-            user: {
-                id: userId,
-                name: email,
-                displayName: email,
-            },
-            pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-            authenticatorSelection: {
-                authenticatorAttachment: 'platform',
-                residentKey: 'required',
-                userVerification: 'required',
-            },
-            attestation: 'direct',
-        };
-
-        res.json(publicKeyCredentialCreationOptions);
-    } catch (err) {
-        console.error('Error in /webauthn/register:', err);
-        return res.status(500).json({ error: 'Database error' });
-    }
+            // Respond with WebAuthn options
+            res.json(publicKeyCredentialCreationOptions);
+        });
+    });
 });
 
-// --- /webauthn/register/complete ---
-app.post('/webauthn/register/complete', async (req, res) => {
+// Endpoint to complete registration
+app.post('/webauthn/register/complete', (req, res) => {
     const { email, credential } = req.body;
     if (!email || !credential) {
         return res.status(400).json({ error: 'Invalid request' });
     }
 
-    try {
-        const connection = await pool.getConnection();
-        const [challengeResults] = await connection.query('SELECT challenge, user_id FROM users WHERE email = ?', [email]);
+    const parsedCredential = credential;
+    const getChallengeQuery = `SELECT challenge, user_id FROM users WHERE email = ?`;
 
-        if (challengeResults.length === 0 || !challengeResults[0].challenge) {
-            connection.release();
+    con.query(getChallengeQuery, [email], async function(err, results) {
+        if (err) {
+            console.error('Error fetching challenge:', err);
+            return res.status(400).json({ error: 'Database error' });
+        }
+       
+        if (results.length === 0 || !results[0].challenge) {
+            console.error('No challenge found for user');
             return res.status(400).json({ error: 'Invalid authentication request' });
         }
+       
+        let storedChallenge = results[0].challenge;
+        const userId = results[0].user_id;
 
-        const storedChallenge = challengeResults[0].challenge;
-        const userId = challengeResults[0].user_id;
+        try {
+            const verification = await verifyRegistrationResponse({
+                response: parsedCredential,
+                expectedChallenge: storedChallenge,
+                expectedOrigin: 'http://localhost:3000',
+                expectedRPID: 'localhost',
+            });
 
-        const verification = await verifyRegistrationResponse({
-            response: credential,
-            expectedChallenge: storedChallenge,
-            expectedOrigin: 'https://passkey-frontend.onrender.com',
-            expectedRPID: 'passkey-frontend.onrender.com',
-        });
+            // Extract the verification result and registration information
+            const { verified, registrationInfo } = verification;
+            
+            if (verified && registrationInfo) {
+                // Debug the registration info structure
+                console.log('Registration info structure:', 
+                    JSON.stringify(registrationInfo, (key, value) => 
+                        ArrayBuffer.isView(value) || value instanceof ArrayBuffer ? 
+                        '[Binary data]' : value
+                    )
+                );
+                
+                let credentialPublicKeyBase64 = null;
+                let credentialIDBase64url = null;
+                const initialCounter = 0;
+                
+                // CHANGE #1: Store the credential ID directly in base64url format
+                if (registrationInfo.credential && registrationInfo.credential.id) {
+                    credentialIDBase64url = registrationInfo.credential.id;
+                }
+                
+                // Convert the public key to base64 if it exists
+                if (registrationInfo.credential && registrationInfo.credential.publicKey) {
+                    try {
+                        credentialPublicKeyBase64 = Buffer.from(registrationInfo.credential.publicKey).toString('base64');
+                    } catch (error) {
+                        console.error('Error converting publicKey to base64:', error);
+                    }
+                }
 
-        const { verified, registrationInfo } = verification;
-
-        if (verified && registrationInfo) {
-            let credentialPublicKeyBase64 = null;
-            let credentialIDBase64url = null;
-            const initialCounter = 0;
-
-            if (registrationInfo.credential && registrationInfo.credential.id) {
-                credentialIDBase64url = registrationInfo.credential.id;
+                // Define the SQL query
+                const insertCredentialQuery = `UPDATE users SET credential = ?, public_key = ?,
+                                              credential_id = ?, counter = ? WHERE email = ?`;
+                
+                // Execute the SQL query to update the user's information
+                con.query(insertCredentialQuery, [
+                    JSON.stringify(registrationInfo),
+                    credentialPublicKeyBase64,
+                    credentialIDBase64url, 
+                    initialCounter, 
+                    email
+                ], (dbError) => {
+                    // Handle any database errors during credential storage
+                    if (dbError) {
+                        console.error('Error storing credential:', dbError);
+                        return res.status(500).json({ error: 'Database error' });
+                    }
+                    
+                    // Send a success response to the client
+                    res.json({ success: true });
+                    
+                    // Log the successful registration
+                    console.log(`Credential and public key saved for ${email}`);
+                    
+                    // Only log these values if they exist
+                    if (credentialPublicKeyBase64) {
+                        console.log('Public Key (Base64):', credentialPublicKeyBase64);
+                    }
+                    
+                    if (credentialIDBase64url) {
+                        console.log('Credential ID (Base64URL):', credentialIDBase64url);
+                    }
+                });
+            } else {
+                // Handle the case where verification failed
+                console.error('Registration verification failed');
+                return res.status(400).json({ error: 'Registration verification failed' });
             }
-
-            if (registrationInfo.credential && registrationInfo.credential.publicKey) {
-                credentialPublicKeyBase64 = Buffer.from(registrationInfo.credential.publicKey).toString('base64');
-            }
-
-            const insertCredentialQuery = `UPDATE users SET credential = ?, public_key = ?, credential_id = ?, counter = ? WHERE email = ?`;
-            await connection.query(insertCredentialQuery, [JSON.stringify(registrationInfo), credentialPublicKeyBase64, credentialIDBase64url, initialCounter, email]);
-
-            connection.release();
-            res.json({ success: true });
-            console.log(`Credential and public key saved for ${email}`);
-            if (credentialPublicKeyBase64) console.log('Public Key (Base64):', credentialPublicKeyBase64);
-            if (credentialIDBase64url) console.log('Credential ID (Base64URL):', credentialIDBase64url);
-        } else {
-            connection.release();
-            return res.status(400).json({ error: 'Registration verification failed' });
+        } catch (verificationError) {
+            // Handle any errors that occurred during verification
+            console.error('Verification error:', verificationError);
+            return res.status(400).json({ error: 'Verification error' });
         }
-    } catch (err) {
-        console.error('Error storing credential:', err);
-        return res.status(500).json({ error: 'Database error' });
-    }
+    });
 });
 
-// --- /webauthn/authenticate -----
-app.post('/webauthn/authenticate', async (req, res) => {
+// Begin authentication
+app.post('/webauthn/authenticate', (req, res) => {
     const { email } = req.body;
 
     if (!email) {
         return res.status(400).json({ error: 'Email is required' });
     }
 
-    try {
-        const connection = await pool.getConnection();
+    // Generate a new challenge
+    const challengeBuffer = crypto.randomBytes(32);
+    const challenge = base64url.encode(challengeBuffer);
+    
+    console.log("Generated challenge for authentication:", challenge);
 
-        // Generate a new challenge (using base64url encoding)
-        const challengeBuffer = crypto.randomBytes(32);
-        const challenge = base64url.encode(challengeBuffer);
-
-        console.log("Generated challenge for authentication:", challenge);
-
-        // Store challenge in database
-        await connection.query('UPDATE users SET challenge = ? WHERE email = ?', [challenge, email]);
-
-        // Retrieve the credential ID for this user
-        const [results] = await connection.query('SELECT credential_id FROM users WHERE email = ?', [email]);
-
-        if (results.length === 0 || !results[0].credential_id) {
-            connection.release();
-            return res.status(400).json({ error: 'User not found or not registered' });
+    // Store challenge in database
+    const updateChallengeQuery = `UPDATE users SET challenge = ? WHERE email = ?`;
+    con.query(updateChallengeQuery, [challenge, email], (err) => {
+        if (err) {
+            console.error('Error updating challenge:', err);
+            return res.status(500).json({ error: 'Database error' });
         }
 
-        const credentialId = results[0].credential_id;
+        // Retrieve the credential ID for this user
+        const getCredentialQuery = `SELECT credential_id FROM users WHERE email = ?`;
+        con.query(getCredentialQuery, [email], (err, results) => {
+            if (err || results.length === 0) {
+                console.error('Error fetching credential ID:', err);
+                return res.status(400).json({ error: 'User not found or not registered' });
+            }
 
-        // Send authentication request to frontend
-        const publicKeyCredentialRequestOptions = {
-            challenge: challenge,
-            allowCredentials: [
-                {
-                    type: 'public-key',
-                    id: credentialId,
-                    transports: ['internal'],
-                }
-            ],
-            userVerification: 'required',
-            timeout: 60000,
-        };
+            const credentialId = results[0].credential_id;
 
-        connection.release();
-        res.json(publicKeyCredentialRequestOptions);
-    } catch (err) {
-        console.error('Error in /webauthn/authenticate:', err);
-        return res.status(500).json({ error: 'Database error' });
-    }
+            // Send authentication request to frontend
+            const publicKeyCredentialRequestOptions = {
+                challenge: challenge,  // Use the same challenge format consistently
+                allowCredentials: [
+                    {
+                        type: 'public-key',
+                        id: credentialId,
+                        transports: ['internal'],
+                    }
+                ],
+                userVerification: 'required',
+                timeout: 60000,
+            };
+            
+            res.json(publicKeyCredentialRequestOptions);
+        });
+    });
 });
 
-app.post('/webauthn/authenticate/complete', async (req, res) => {
+app.post('/webauthn/authenticate/complete', (req, res) => {
     const { email, assertion } = req.body;
 
     if (!email || !assertion) {
         return res.status(400).json({ error: 'Invalid request' });
     }
 
-    try {
-        const connection = await pool.getConnection();
-
-        const [results] = await connection.query('SELECT challenge, public_key, credential_id, counter FROM users WHERE email = ?', [email]);
-
-        if (results.length === 0) {
-            connection.release();
-            return res.status(400).json({ error: 'User not found' });
+    // Get the user data needed for verification
+    const getUserDataQuery = `SELECT challenge, public_key, credential_id, counter FROM users WHERE email = ?`;
+    
+    con.query(getUserDataQuery, [email], async (err, results) => {
+        if (err) {
+            console.error('Error fetching user data:', err);
+            return res.status(500).json({ error: 'Database error' });
         }
 
+        if (results.length === 0) {
+            console.error('User not found:', email);
+            return res.status(400).json({ error: 'User not found' });
+        }
+        
         const userData = results[0];
-
+        
         if (!userData.challenge) {
-            connection.release();
+            console.error('No active challenge found for user');
             return res.status(400).json({ error: 'No active authentication request' });
         }
 
         if (!userData.public_key || !userData.credential_id) {
-            connection.release();
+            console.error('Public key or credential ID not found for user');
             return res.status(400).json({ error: 'User not properly registered' });
         }
 
@@ -231,75 +296,84 @@ app.post('/webauthn/authenticate/complete', async (req, res) => {
         const publicKeyBase64 = userData.public_key;
         const credentialId = userData.credential_id;
         const storedCounter = typeof userData.counter === 'number' ? userData.counter : 0;
+        
+        try {
+            // Helper function to ensure base64url format
+            const toBase64Url = (str) => {
+                // If already base64url, return as-is
+                if (!/[+/=]/.test(str)) {
+                    return str;
+                }
+                
+                // If standard base64, convert to base64url
+                return str.replace(/\+/g, '-')
+                          .replace(/\//g, '_')
+                          .replace(/=+$/, '');
+            };
 
-        // Helper function to ensure base64url format
-        const toBase64Url = (str) => {
-            if (!/[+/=]/.test(str)) {
-                return str;
+            // Properly format all parts of the assertion for WebAuthn verification
+            const formattedAssertion = {
+                id: toBase64Url(assertion.id || assertion.rawId),
+                rawId: toBase64Url(assertion.rawId || assertion.id),
+                type: assertion.type,
+                response: {
+                    clientDataJSON: toBase64Url(assertion.response.clientDataJSON),
+                    authenticatorData: toBase64Url(assertion.response.authenticatorData),
+                    signature: toBase64Url(assertion.response.signature)
+                }
+            };
+            
+            // Add userHandle if it exists
+            if (assertion.response.userHandle) {
+                formattedAssertion.response.userHandle = toBase64Url(assertion.response.userHandle);
             }
-            return str.replace(/\+/g, '-')
-                .replace(/\//g, '_')
-                .replace(/=+$/, '');
-        };
 
-        // Properly format all parts of the assertion for WebAuthn verification
-        const formattedAssertion = {
-            id: toBase64Url(assertion.id || assertion.rawId),
-            rawId: toBase64Url(assertion.rawId || assertion.id),
-            type: assertion.type,
-            response: {
-                clientDataJSON: toBase64Url(assertion.response.clientDataJSON),
-                authenticatorData: toBase64Url(assertion.response.authenticatorData),
-                signature: toBase64Url(assertion.response.signature)
-            }
-        };
-
-        // Add userHandle if it exists
-        if (assertion.response.userHandle) {
-            formattedAssertion.response.userHandle = toBase64Url(assertion.response.userHandle);
+            const verification = await verifyAuthenticationResponse({
+                response: formattedAssertion,
+                expectedChallenge: storedChallenge,
+                expectedOrigin: 'http://localhost:3000',
+                expectedRPID: 'localhost',
+                credential: {
+                    id: credentialId,
+                    publicKey: Buffer.from(publicKeyBase64, 'base64'),
+                    credentialPublicKey: Buffer.from(publicKeyBase64, 'base64'),
+                    counter: storedCounter
+                },
+                requireUserVerification: true,
+            });
+            
+            console.log('Library verification successful:', JSON.stringify(verification, null, 2));
+            
+            // Extract the new counter value from verification result
+            const newCounter = verification.authenticationInfo.newCounter;
+            console.log('Authentication successful for user:', email);
+            
+            // Update the counter and clear the challenge
+            const updateUserQuery = `UPDATE users SET challenge = NULL, counter = ? WHERE email = ?`;
+            con.query(updateUserQuery, [newCounter, email], (updateErr) => {
+                if (updateErr) {
+                    console.error('Error updating user data:', updateErr);
+                    return res.status(500).json({ error: 'Database error' });
+                }
+                
+                console.log('User data updated with new counter:', newCounter);
+                
+                // Send success response
+                res.json({ 
+                    success: true,
+                    message: 'Authentication successful'
+                });
+            });
+        } catch (error) {
+            console.error('Authentication verification error:', error);
+            return res.status(400).json({ 
+                error: 'Authentication failed',
+                details: error.message
+            });
         }
-
-        const verification = await verifyAuthenticationResponse({
-            response: formattedAssertion,
-            expectedChallenge: storedChallenge,
-            expectedOrigin: 'https://passkey-frontend.onrender.com', // Update with your origin
-            expectedRPID: 'passkey-frontend.onrender.com', // Update with your RPID
-            credential: {
-                id: credentialId,
-                publicKey: Buffer.from(publicKeyBase64, 'base64'),
-                credentialPublicKey: Buffer.from(publicKeyBase64, 'base64'),
-                counter: storedCounter
-            },
-            requireUserVerification: true,
-        });
-
-        console.log('Library verification successful:', JSON.stringify(verification, null, 2));
-
-        // Extract the new counter value from verification result
-        const newCounter = verification.authenticationInfo.newCounter;
-        console.log('Authentication successful for user:', email);
-
-        // Update the counter and clear the challenge
-        await connection.query('UPDATE users SET challenge = NULL, counter = ? WHERE email = ?', [newCounter, email]);
-
-        connection.release();
-
-        res.json({
-            success: true,
-            message: 'Authentication successful'
-        });
-    } catch (error) {
-        console.error('Authentication verification error:', error);
-        return res.status(400).json({
-            error: 'Authentication failed',
-            details: error.message
-        });
-    }
+    });
 });
 
-const PORT = process.env.PORT || 5200;
-
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}...`);
+app.listen(5200, () => {
+    console.log('Server running on port 5200...');
 });
-

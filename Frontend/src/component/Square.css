@@ -1,0 +1,72 @@
+/* Square.css - Modern 3D Style */
+.square {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 48px;
+  cursor: pointer;
+  position: relative;
+  z-index: 1;
+  background-color: transparent;
+  transition: all 0.2s ease;
+  border-radius: 8px;
+}
+
+.square:hover {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+.square-value {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-weight: bold;
+  transform: scale(0.9);
+  transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.square:active .square-value {
+  transform: scale(0.8);
+}
+
+/* X Mark with 3D effect */
+.x-mark {
+  color: #e74c3c;
+  text-shadow: 2px 2px 0 #c0392b, 
+               3px 3px 0 rgba(0, 0, 0, 0.2);
+  transform-origin: center;
+}
+
+/* O Mark with 3D effect */
+.o-mark {
+  color: #3498db;
+  text-shadow: 2px 2px 0 #2980b9,
+               3px 3px 0 rgba(0, 0, 0, 0.2);
+  transform-origin: center;
+}
+
+/* Animation for when a mark appears */
+@keyframes popIn {
+  0% { transform: scale(0); opacity: 0; }
+  70% { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.square-value.new-mark {
+  animation: popIn 0.3s forwards;
+}
+
+/* Winner highlighting */
+.winner .square-value {
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { transform: scale(0.9); }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(0.9); }
+}
